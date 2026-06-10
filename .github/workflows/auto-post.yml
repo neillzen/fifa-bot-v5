@@ -1,1 +1,22 @@
+name: Auto Post FIFA Bot
+on:  schedule:
+    - cron: '0 *' # runs every hour
+  workflow_dispatch:       # manual run button
 
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Run Master Pipeline
+        run: node scripts/MasterPipeline.js
