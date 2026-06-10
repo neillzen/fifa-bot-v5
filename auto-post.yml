@@ -1,0 +1,77 @@
+name: FIFA WC 2026 — Auto Bot v5 FINAL
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # Every 30 min
+    - cron: "0 21 * * *"     # 9PM — daily roundup
+    - cron: "30 22 * * *"    # 10:30PM — golden boot
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no uploads)"
+        default: "false"
+        type: boolean
+      mode:
+        description: "Run mode"
+        default: "full"
+        type: choice
+        options: [full, roundup, golden-boot, setup]
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: "npm" }
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg libcairo2-dev libpango1.0-dev \
+            libjpeg-dev libgif-dev librsvg2-dev
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Restore data cache
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: bot-data-${{ github.run_id }}
+          restore-keys: bot-data-
+
+      - name: Run pipeline
+        env:
+          GEMINI_API_KEY:              ${{ secrets.GEMINI_API_KEY }}
+          ZERNIO_API_KEY:              ${{ secrets.ZERNIO_API_KEY }}
+          ZERNIO_YOUTUBE_ACCOUNT_ID:   ${{ secrets.ZERNIO_YOUTUBE_ACCOUNT_ID }}
+          ZERNIO_TIKTOK_ACCOUNT_ID:    ${{ secrets.ZERNIO_TIKTOK_ACCOUNT_ID }}
+          ZERNIO_TWITTER_ACCOUNT_ID:   ${{ secrets.ZERNIO_TWITTER_ACCOUNT_ID }}
+          FOOTBALL_API_KEY:            ${{ secrets.FOOTBALL_API_KEY }}
+          FOOTBALL_LEAGUE_ID:          ${{ secrets.FOOTBALL_LEAGUE_ID }}
+          FOOTBALL_SEASON:             "2026"
+          DRY_RUN:                     ${{ inputs.dry_run || 'false' }}
+        run: |
+          MODE="${{ inputs.mode || 'full' }}"
+          if   [ "$MODE" = "roundup" ];     then npm run roundup
+          elif [ "$MODE" = "golden-boot" ]; then npm run golden-boot
+          elif [ "$MODE" = "setup" ];       then npm run setup
+          else npm start
+          fi
+
+      - name: Save data cache
+        uses: actions/cache@v4
+        if: always()
+        with:
+          path: data/
+          key: bot-data-${{ github.run_id }}
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: log-${{ github.run_id }}
+          path: data/upload_log.json
+          retention-days: 90
