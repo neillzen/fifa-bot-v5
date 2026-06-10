@@ -1,14 +1,13 @@
 {
   "name": "fifa-wc-auto-bot-v5",
   "version": "5.0.0",
-  "description": "FIFA World Cup 2026 — 16 content types, Gemini AI + Zernio publishing. Zero credit card.",
+  "description": "FIFA World Cup 2026 auto bot",
   "type": "module",
   "scripts": {
     "start":       "node scripts/masterPipeline.js",
     "test":        "node scripts/masterPipeline.js --dry-run",
     "roundup":     "node scripts/masterPipeline.js --roundup",
     "golden-boot": "node scripts/masterPipeline.js --golden-boot",
-    "test-ai":     "node scripts/ai.js",
     "setup":       "node scripts/setup.js"
   },
   "dependencies": {
@@ -20,3 +19,4 @@
     "dotenv":          "^16.4.5"
   }
 }
+ 
