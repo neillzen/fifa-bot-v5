@@ -1,7 +1,8 @@
 name: Auto Post FIFA Bot
-on:  schedule:
-    - cron: '0 *' # runs every hour
-  workflow_dispatch:       # manual run button
+on:
+  schedule:
+    - cron: '0 *'  # runs every hour
+  workflow_dispatch:  # manual run button
 
 jobs:
   run-bot:
@@ -19,4 +20,4 @@ jobs:
         run: npm install
       
       - name: Run Master Pipeline
-        run: node scripts/MasterPipeline.js
+        run: node scripts/MasterPipeline.js 
