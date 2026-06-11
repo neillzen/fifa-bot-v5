@@ -1,7 +1,8 @@
+import { generate, generateJSON } from "./ai.js";
 // scripts/dailyRoundup.js
 // End-of-day roundup covering ALL matches played that day
 
-import Anthropic from "@anthropic-ai/sdk";
+
 import axios from "axios";
 import { createCanvas } from "canvas";
 import fs from "fs";
@@ -12,7 +13,7 @@ import "dotenv/config";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_DIR = path.join(__dirname, "../tmp/output");
 const W = 1280, H = 720;
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
 
 export async function fetchTodaysMatches() {
   const today = new Date().toISOString().split("T")[0];
@@ -124,3 +125,4 @@ export function renderRoundupThumbnail(matches, date) {
   fs.writeFileSync(p, canvas.toBuffer("image/png"));
   return p;
 }
+ 
