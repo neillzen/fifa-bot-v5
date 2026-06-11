@@ -1,7 +1,8 @@
+import { generate, generateJSON } from "./ai.js";
 // scripts/standingsUpdate.js
 // Posts group standings after every group stage match — very high search volume
 
-import Anthropic from "@anthropic-ai/sdk";
+
 import axios from "axios";
 import { createCanvas } from "canvas";
 import fs from "fs";
@@ -12,7 +13,7 @@ import "dotenv/config";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_DIR = path.join(__dirname, "../tmp/output");
 const W = 1080, H = 1350; // Portrait for Shorts
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
 
 export async function fetchGroupStandings(leagueId = 1) {
   const res = await axios.get("https://v3.football.api-sports.io/standings", {
