@@ -1,11 +1,12 @@
+import { generate, generateJSON } from "./ai.js";
 // scripts/twitterThreads.js
 // Posts match stats as Twitter/X threads — drives traffic back to YouTube
 
-import Anthropic from "@anthropic-ai/sdk";
+
 import axios from "axios";
 import "dotenv/config";
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
 
 export async function generateMatchThread(match, youtubeUrl) {
   const goalsList = (match.goals || []).map(g => `⚽ ${g.player} ${g.minute}' (${g.team})`).join("\n");
@@ -86,3 +87,4 @@ export async function postThread(tweets) {
 // TWITTER_ACCESS_SECRET=your_access_secret
 // Get credentials at: https://developer.twitter.com
 // Required: Free tier allows 1,500 tweets/month (more than enough for 64 matches)
+ 
