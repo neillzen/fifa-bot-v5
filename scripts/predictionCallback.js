@@ -1,9 +1,10 @@
+import { generate, generateJSON } from "./ai.js";
 // scripts/predictionCallback.js
 // After each match, references back to the prediction video
 // "We predicted X — here's what actually happened"
 // Builds trust + drives viewers to watch prediction video = more watch time
 
-import Anthropic from "@anthropic-ai/sdk";
+
 import { createCanvas } from "canvas";
 import fs from "fs";
 import path from "path";
@@ -13,7 +14,7 @@ import "dotenv/config";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_DIR = path.join(__dirname, "../tmp/output");
 const W = 1280, H = 720;
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
 
 export function getPredictionResult(match, predictedScore) {
   if (!predictedScore) return { correct: false, type: "unknown" };
