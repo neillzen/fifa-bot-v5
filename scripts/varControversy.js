@@ -1,7 +1,8 @@
+import { generate, generateJSON } from "./ai.js";
 // scripts/varControversy.js
 // Detects VAR/controversial moments from match events and generates instant reaction video
 
-import Anthropic from "@anthropic-ai/sdk";
+
 import axios from "axios";
 import { createCanvas } from "canvas";
 import fs from "fs";
@@ -12,7 +13,7 @@ import "dotenv/config";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_DIR = path.join(__dirname, "../tmp/output");
 const W = 1280, H = 720;
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
 
 // Detect controversy from match events
 export function detectControversy(match) {
