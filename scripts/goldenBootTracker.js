@@ -1,8 +1,10 @@
-// scripts/goldenBootTracker.js
-// Updates top scorers leaderboard after each match day — very searchable
+import { generate, generateJSON } from "./ai.js";
+// scripts/predictionCallback.js
+// After each match, references back to the prediction video
+// "We predicted X — here's what actually happened"
+// Builds trust + drives viewers to watch prediction video = more watch time
 
-import Anthropic from "@anthropic-ai/sdk";
-import axios from "axios";
+
 import { createCanvas } from "canvas";
 import fs from "fs";
 import path from "path";
@@ -12,99 +14,121 @@ import "dotenv/config";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUTPUT_DIR = path.join(__dirname, "../tmp/output");
 const W = 1280, H = 720;
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-export async function fetchTopScorers() {
-  const res = await axios.get("https://v3.football.api-sports.io/players/topscorers", {
-    headers: { "x-rapidapi-key": process.env.FOOTBALL_API_KEY, "x-rapidapi-host": "v3.football.api-sports.io" },
-    params: { league: process.env.FOOTBALL_LEAGUE_ID || 1, season: 2026 },
-  });
-  return res.data.response.slice(0, 8).map(p => ({
-    name: p.player.name,
-    nationality: p.player.nationality,
-    team: p.statistics[0]?.team?.name,
-    goals: p.statistics[0]?.goals?.total || 0,
-    assists: p.statistics[0]?.goals?.assists || 0,
-    apps: p.statistics[0]?.games?.appearences || 0,
-  }));
-}
 
-export async function generateGoldenBootScript(scorers, matchDay) {
-  const top3 = scorers.slice(0, 3).map((s, i) => `${i+1}. ${s.name} (${s.team}) — ${s.goals} goals`).join("\n");
+export function getPredictionResult(match, predictedScore) {
+  if (!predictedScore) return { correct: false, type: "unknown" };
 
-  const msg = await client.messages.create({
-    model: "claude-sonnet-4-20250514", max_tokens: 600,
-    messages: [{ role: "user", content: `Write a 45-second GOLDEN BOOT RACE update script for YouTube Shorts.
+  const predictedWinner =
+    predictedScore.home > predictedScore.away ? "home" :
+    predictedScore.away > predictedScore.home ? "away" : "draw";
 
-TOP SCORERS RIGHT NOW:
-${top3}
+  const actualWinner =
+    match.home.score > match.away.score ? "home" :
+    match.away.score > match.home.score ? "away" : "draw";
 
-FORMAT:
-[HOOK] "The Golden Boot race is getting SPICY. Here's where it stands."
-[TOP 3] Hype each of the top 3 scorers in one sentence each.
-[DARK HORSE] Mention one player outside top 3 who could still win it.
-[HISTORY] Name one iconic Golden Boot winner from past World Cups for context.
-[OUTRO] "Who wins the Golden Boot 2026? Drop your pick below 👇"
+  const exactScore = predictedScore.home === match.home.score && predictedScore.away === match.away.score;
+  const correctResult = predictedWinner === actualWinner;
 
-Under 130 words. Fast, punchy, names every player dramatically.` }],
-  });
-
-  const script = msg.content[0].text;
   return {
-    script, scorers,
-    title: `GOLDEN BOOT RACE 🥾 Top Scorers Update | FIFA World Cup 2026`,
-    description: `Who's leading the Golden Boot race at FIFA World Cup 2026? Updated top scorers leaderboard after matchday ${matchDay}.`,
-    hashtags: "#GoldenBoot #FIFAWorldCup2026 #TopScorers #WC2026 #Goals",
-    videoType: "golden-boot",
+    exactScore,
+    correctResult,
+    predicted: `${match.home.name} ${predictedScore.home}-${predictedScore.away} ${match.away.name}`,
+    actual: `${match.home.name} ${match.home.score}-${match.away.score} ${match.away.name}`,
+    type: exactScore ? "exact" : correctResult ? "result" : "wrong",
   };
 }
 
-export function renderGoldenBootThumbnail(scorers) {
+export async function generateCallbackScript(match, predResult) {
+  const statusLine = {
+    exact:  `WE CALLED IT EXACTLY. ${predResult.predicted}. That's EXACTLY what happened.`,
+    result: `We got the result right! We said ${predResult.predicted} — the actual score was ${predResult.actual}.`,
+    wrong:  `Okay, we were wrong. We predicted ${predResult.predicted} — the actual result was ${predResult.actual}.`,
+  }[predResult.type];
+
+  const msg = await client.messages.create({
+    model: "claude-sonnet-4-20250514", max_tokens: 700,
+    messages: [{ role: "user", content: `Write a 45-second PREDICTION CALLBACK script for YouTube Shorts.
+
+MATCH: ${match.home.name} ${match.home.score}-${match.away.score} ${match.away.name}
+OUR PREDICTION WAS: ${predResult.predicted}
+ACTUAL RESULT: ${predResult.actual}
+STATUS: ${predResult.type.toUpperCase()}
+
+OPENING LINE TO USE: "${statusLine}"
+
+FORMAT:
+[OPEN] Use the opening line above verbatim.
+[BREAKDOWN] 2 sentences on what we got right/wrong and why.
+[HONEST] If wrong, own it. If right, celebrate it. Be real.
+[SCORE] "Prediction accuracy: [result/wrong/EXACT SCORE]"
+[OUTRO] "Check the prediction video to see what we saw before kickoff. Link above."
+
+Under 130 words. Honest, funny, builds trust.` }],
+  });
+
+  const script = msg.content[0].text;
+  const emoji = { exact: "🎯", result: "✅", wrong: "❌" }[predResult.type];
+
+  return {
+    script, predResult,
+    title: `${emoji} Our Prediction vs Reality | ${match.home.name} ${match.home.score}-${match.away.score} ${match.away.name} | WC2026`,
+    description: `We predicted ${predResult.predicted}. The actual result was ${predResult.actual}. How did we do? FIFA World Cup 2026.`,
+    hashtags: "#FIFAWorldCup2026 #Prediction #WC2026 #Football #DidWeGetItRight",
+    videoType: "prediction-callback",
+  };
+}
+
+export function renderCallbackThumbnail(match, predResult) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext("2d");
 
+  const colors = { exact: ["#003300","#004400"], result: ["#002200","#003300"], wrong: ["#1a0000","#2a0000"] };
+  const [c1, c2] = colors[predResult.type] || colors.wrong;
   const bg = ctx.createLinearGradient(0,0,W,H);
-  bg.addColorStop(0,"#0a0600"); bg.addColorStop(1,"#1a1000");
+  bg.addColorStop(0,c1); bg.addColorStop(1,c2);
   ctx.fillStyle = bg; ctx.fillRect(0,0,W,H);
 
-  const glow = ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,340);
-  glow.addColorStop(0,"rgba(255,180,0,0.15)"); glow.addColorStop(1,"rgba(0,0,0,0)");
-  ctx.fillStyle = glow; ctx.fillRect(0,0,W,H);
+  const accentColor = { exact:"#00ff88", result:"#4caf50", wrong:"#f44336" }[predResult.type];
+  ctx.fillStyle = accentColor; ctx.fillRect(0,0,W,7);
 
-  const goldBar = ctx.createLinearGradient(0,0,W,0);
-  goldBar.addColorStop(0,"#8B6914"); goldBar.addColorStop(0.5,"#FFD700"); goldBar.addColorStop(1,"#8B6914");
-  ctx.fillStyle = goldBar; ctx.fillRect(0,0,W,7);
+  const badge = { exact:"🎯 EXACT SCORE!", result:"✅ CORRECT RESULT", wrong:"❌ WE GOT IT WRONG" }[predResult.type];
+  ctx.fillStyle = `${accentColor}22`;
+  ctx.beginPath(); ctx.roundRect(W/2-220,16,440,44,6); ctx.fill();
+  ctx.fillStyle = accentColor; ctx.font = "bold 22px monospace"; ctx.textAlign = "center";
+  ctx.fillText(badge, W/2, 46);
 
-  ctx.fillStyle = "rgba(255,215,0,0.1)";
-  ctx.beginPath(); ctx.roundRect(W/2-215,16,430,44,6); ctx.fill();
-  ctx.fillStyle = "#FFD700"; ctx.font = "bold 20px monospace"; ctx.textAlign = "center";
-  ctx.fillText("🥾 GOLDEN BOOT RACE — WC2026", W/2, 46);
+  ctx.fillStyle = "rgba(255,255,255,0.4)"; ctx.font = "bold 22px monospace";
+  ctx.fillText("WE PREDICTED", W/2, 130);
+  ctx.fillStyle = accentColor; ctx.font = "bold 58px monospace";
+  ctx.shadowColor = `${accentColor}66`; ctx.shadowBlur = 16;
+  ctx.fillText(predResult.predicted.split(" ").slice(1,3).join(" ") || predResult.predicted, W/2, 210);
+  ctx.shadowBlur = 0;
 
-  // Boot emoji large
-  ctx.font = "80px sans-serif"; ctx.fillText("🥾", W/2, 160);
+  ctx.strokeStyle = "rgba(255,255,255,0.1)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(100,240); ctx.lineTo(W-100,240); ctx.stroke();
 
-  const medals = ["🥇","🥈","🥉"];
-  scorers.slice(0,5).forEach((s, i) => {
-    const y = 200 + i * 86;
-    ctx.fillStyle = i < 3 ? "rgba(255,215,0,0.08)" : "rgba(255,255,255,0.03)";
-    ctx.beginPath(); ctx.roundRect(40, y, W-80, 72, 8); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.4)"; ctx.font = "bold 22px monospace";
+  ctx.fillText("ACTUAL RESULT", W/2, 290);
+  ctx.fillStyle = "#ffffff"; ctx.font = "bold 68px monospace";
+  ctx.shadowColor = "rgba(0,0,0,0.8)"; ctx.shadowBlur = 10;
+  ctx.fillText(`${match.home.score} - ${match.away.score}`, W/2, 380);
+  ctx.shadowBlur = 0;
 
-    ctx.font = i < 3 ? "bold 36px sans-serif" : "28px sans-serif";
-    ctx.fillStyle = i < 3 ? "#FFD700" : "rgba(255,255,255,0.5)";
-    ctx.textAlign = "left";
-    ctx.fillText(`${medals[i] || `${i+1}.`}  ${s.name}`, 70, y+46);
+  ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = "bold 26px sans-serif";
+  ctx.fillText(`${match.home.name}  vs  ${match.away.name}`, W/2, 430);
 
-    ctx.fillStyle = i < 3 ? "#FFD700" : "rgba(255,255,255,0.4)";
-    ctx.font = i < 3 ? "bold 40px monospace" : "bold 32px monospace";
-    ctx.textAlign = "right";
-    ctx.fillText(`${s.goals} ⚽`, W-60, y+46);
+  const fade = ctx.createLinearGradient(0,H-160,0,H);
+  fade.addColorStop(0,"rgba(0,0,0,0)"); fade.addColorStop(1,"rgba(0,0,0,0.9)");
+  ctx.fillStyle = fade; ctx.fillRect(0,0,W,H);
 
-    ctx.fillStyle = "rgba(255,255,255,0.3)"; ctx.font = "20px monospace";
-    ctx.fillText(s.team, W-60, y+68);
-  });
+  ctx.fillStyle = "#fff"; ctx.font = "bold 48px sans-serif";
+  ctx.shadowColor = "rgba(0,0,0,0.95)"; ctx.shadowBlur = 14;
+  ctx.fillText("DID WE CALL IT? 🎯", W/2, H-42);
+  ctx.shadowBlur = 0;
 
-  const p = path.join(OUTPUT_DIR, `goldboot_thumb_${Date.now()}.png`);
+  const p = path.join(OUTPUT_DIR, `callback_thumb_${match.id||Date.now()}.png`);
   fs.writeFileSync(p, canvas.toBuffer("image/png"));
   return p;
 }
