@@ -61,4 +61,3 @@ if (process.argv[1].includes("checkMatches")) {
 
   printApiUsage();
 }
- 
