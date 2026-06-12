@@ -1,18 +1,20 @@
-// scripts/dataLayer.js  — v2
-// THREE API SOURCES working together:
+// scripts/dataLayer.js
+// ═══════════════════════════════════════════════════════════════
+// DUAL API STRATEGY — Used by BOTH YouTube and Facebook bots
 //
-//  [1] worldcup26.ir    — FREE, no key, WC2026 only, real-time
-//  [2] football-data.org — FREE token, WC code "WC", schedule + standings
-//  [3] api-football      — FREE 100/day, live events + player stats
+// football-data.org  (FD)  → fixtures, schedule, standings, results
+//                            Free: 10 req/min, comp code "WC", no key needed for basic
+//                            Sign up at football-data.org for auth token (higher limits)
 //
-// ROUTING:
-//  Finished matches  → [1] worldcup26.ir first → [3] AF fallback
-//  Upcoming fixtures → [1] worldcup26.ir first → [2] FD fallback
-//  Standings         → [1] worldcup26.ir first → [2] FD fallback
-//  Goals/events      → [3] AF only (best data)
-//  Player stats      → [3] AF only
-//  Top scorers       → [3] AF only
-//  H2H               → [2] FD first → [3] AF fallback
+// api-football        (AF)  → live events, goals, player stats, lineups
+//                            Free: 100 req/day, league=1, season=2026
+//
+// HOW THEY WORK TOGETHER:
+// - FD fetches the schedule (saves AF quota for match-day only)
+// - AF fetches live goals + player stats (FD doesn't have this depth)
+// - If one API fails, the other acts as fallback automatically
+// - Request counts tracked to avoid hitting limits
+// ═══════════════════════════════════════════════════════════════
 
 import axios from "axios";
 import fs from "fs";
@@ -21,158 +23,87 @@ import { fileURLToPath } from "url";
 import "dotenv/config";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// ── Cache (5 min TTL) ─────────────────────────────────────────
 const CACHE_FILE = path.join(__dirname, "../data/api_cache.json");
-function loadCache() { try { return JSON.parse(fs.readFileSync(CACHE_FILE,"utf8")); } catch { return {}; } }
-function saveCache(c) { fs.mkdirSync(path.dirname(CACHE_FILE),{recursive:true}); fs.writeFileSync(CACHE_FILE,JSON.stringify(c)); }
-function getCached(k) { const c=loadCache(),e=c[k]; return (e&&Date.now()-e.t<300000)?e.d:null; }
-function setCache(k,d) { const c=loadCache(); c[k]={d,t:Date.now()}; const keys=Object.keys(c); if(keys.length>100)delete c[keys[0]]; saveCache(c); }
 
-// ── API call tracker ──────────────────────────────────────────
-const COUNTS_FILE = path.join(__dirname, "../data/api_counts.json");
-function trackCall(api) {
-  let c; try{c=JSON.parse(fs.readFileSync(COUNTS_FILE,"utf8"));}catch{c={fd:0,af:0,wc:0,date:""};}
-  const today=new Date().toISOString().split("T")[0];
-  if(c.date!==today){c.fd=0;c.af=0;c.wc=0;c.date=today;}
-  c[api]=(c[api]||0)+1;
-  fs.mkdirSync(path.dirname(COUNTS_FILE),{recursive:true});
-  fs.writeFileSync(COUNTS_FILE,JSON.stringify(c));
-  if(api==="af"&&c.af>=85) console.log(`  ⚠️  AF: ${c.af}/100 daily calls used`);
+// ── Cache layer (avoid duplicate calls within 5 mins) ─────────
+function loadCache() { try { return JSON.parse(fs.readFileSync(CACHE_FILE,"utf8")); } catch { return {}; } }
+function saveCache(c) { fs.mkdirSync(path.dirname(CACHE_FILE),{recursive:true}); fs.writeFileSync(CACHE_FILE,JSON.stringify(c,null,2)); }
+function getCached(key) {
+  const c = loadCache();
+  const e = c[key];
+  if (e && Date.now() - e.timestamp < 5 * 60 * 1000) return e.data;
+  return null;
+}
+function setCache(key, data) {
+  const c = loadCache();
+  c[key] = { data, timestamp: Date.now() };
+  // Keep cache small — only last 100 entries
+  const keys = Object.keys(c);
+  if (keys.length > 100) delete c[keys[0]];
+  saveCache(c);
 }
 
-// ── Base URLs ─────────────────────────────────────────────────
-const WC_BASE = "https://worldcup26.ir";   // No auth needed
-const FD_BASE = "https://api.football-data.org/v4";
-const AF_BASE = "https://v3.football.api-sports.io";
+// ── API clients ───────────────────────────────────────────────
+const FD_BASE   = "https://api.football-data.org/v4";
+const AF_BASE   = "https://v3.football.api-sports.io";
+const FD_TOKEN  = process.env.FD_API_TOKEN;    // football-data.org token (optional, higher limits)
+const AF_KEY    = process.env.FOOTBALL_API_KEY; // api-football key
 
 function fdHeaders() {
-  const h = {};
-  if (process.env.FD_API_TOKEN) h["X-Auth-Token"] = process.env.FD_API_TOKEN;
+  const h = { "Content-Type": "application/json" };
+  if (FD_TOKEN) h["X-Auth-Token"] = FD_TOKEN;
   return h;
 }
 function afHeaders() {
-  return { "x-rapidapi-key":process.env.FOOTBALL_API_KEY, "x-rapidapi-host":"v3.football.api-sports.io" };
+  return { "x-rapidapi-key": AF_KEY, "x-rapidapi-host": "v3.football.api-sports.io" };
 }
 
-// ══════════════════════════════════════════════════════════════
-// [1] worldcup26.ir  — PRIMARY SOURCE, no key required
-// ══════════════════════════════════════════════════════════════
-
-// Get WC auth token (free signup at worldcup26.ir)
-let wcToken = null;
-async function getWcToken() {
-  if (wcToken) return wcToken;
-  if (!process.env.WC26_EMAIL || !process.env.WC26_PASSWORD) return null;
-  try {
-    const res = await axios.post(`${WC_BASE}/auth/login`, {
-      email: process.env.WC26_EMAIL,
-      password: process.env.WC26_PASSWORD,
-    });
-    wcToken = res.data.token;
-    return wcToken;
-  } catch { return null; }
+// ── Request counter (prevent hitting limits) ──────────────────
+const COUNTS_FILE = path.join(__dirname, "../data/api_counts.json");
+function loadCounts() { try { return JSON.parse(fs.readFileSync(COUNTS_FILE,"utf8")); } catch { return { fd:0, af:0, date:"" }; } }
+function trackCall(api) {
+  const c = loadCounts();
+  const today = new Date().toISOString().split("T")[0];
+  if (c.date !== today) { c.fd=0; c.af=0; c.date=today; }
+  c[api]++;
+  fs.mkdirSync(path.dirname(COUNTS_FILE),{recursive:true});
+  fs.writeFileSync(COUNTS_FILE, JSON.stringify(c,null,2));
+  // Warn when approaching limits
+  if (api==="af" && c.af >= 90)  console.log(`  ⚠️  AF API: ${c.af}/100 daily calls used`);
+  if (api==="fd" && c.fd >= 500) console.log(`  ⚠️  FD API: ${c.fd} calls today`);
 }
 
-async function wcGet(endpoint) {
-  const token = await getWcToken();
-  const headers = token ? { Authorization:`Bearer ${token}` } : {};
-  const res = await axios.get(`${WC_BASE}${endpoint}`, { headers, timeout: 8000 });
-  return res.data;
-}
+// ═══════════════════════════════════════════════════════════════
+// FOOTBALL-DATA.ORG FUNCTIONS
+// Competition code for World Cup = "WC"
+// ═══════════════════════════════════════════════════════════════
 
-// Get all WC2026 matches (with optional status filter)
-async function wcGetMatches(statusFilter = null) {
-  const key = `wc_matches_${statusFilter||"all"}`;
-  const cached = getCached(key);
-  if (cached) return cached;
-
-  trackCall("wc");
-  const data = await wcGet("/get/games");
-  let matches = (data.games || data || []);
-
-  // Normalize to standard format
-  matches = matches.map(m => ({
-    id:      `wc_${m.id || m.match_id}`,
-    wcId:    m.id || m.match_id,
-    date:    m.datetime || m.date || m.kickoff,
-    round:   m.stage || m.round || m.group || "Group Stage",
-    status:  m.status || "SCHEDULED",
-    home: {
-      name:  m.home_team || m.homeTeam?.name || m.home,
-      score: m.home_score ?? m.homeScore ?? null,
-      id:    m.home_team_id || null,
-    },
-    away: {
-      name:  m.away_team || m.awayTeam?.name || m.away,
-      score: m.away_score ?? m.awayScore ?? null,
-      id:    m.away_team_id || null,
-    },
-    goals: (m.goals || m.events || []).filter(e =>
-      e.type==="goal"||e.type==="Goal"||e.event_type==="goal"
-    ).map(e => ({
-      team:   e.team_name || e.team,
-      player: e.player_name || e.player,
-      minute: e.minute || e.time,
-      type:   e.detail || "Normal Goal",
-    })),
-    events: m.events || [],
-    source: "worldcup26.ir",
-  }));
-
-  if (statusFilter) {
-    const sf = statusFilter.toLowerCase();
-    matches = matches.filter(m => {
-      const s = (m.status||"").toLowerCase();
-      if (sf==="finished") return s==="finished"||s==="ft"||s==="completed"||s==="full_time";
-      if (sf==="upcoming") return s==="scheduled"||s==="timed"||s==="upcoming"||s==="ns";
-      return true;
-    });
-  }
-
-  setCache(key, matches);
-  return matches;
-}
-
-// Get WC2026 standings from worldcup26.ir
-async function wcGetStandings() {
-  const key = "wc_standings";
-  const cached = getCached(key);
-  if (cached) return cached;
-
-  trackCall("wc");
-  const data = await wcGet("/get/groups");
-  setCache(key, data);
-  return data;
-}
-
-// ══════════════════════════════════════════════════════════════
-// [2] football-data.org  — SECONDARY SOURCE
-// ══════════════════════════════════════════════════════════════
-
-async function fdGetMatches(dateFrom, dateTo, status = null) {
-  const key = `fd_${dateFrom}_${dateTo}_${status}`;
+// Fetch today's WC fixtures from football-data.org
+export async function fdGetTodaysMatches() {
+  const key = `fd_today_${new Date().toISOString().split("T")[0]}`;
   const cached = getCached(key);
   if (cached) return cached;
 
   trackCall("fd");
-  const params = { dateFrom, dateTo };
-  if (status) params.status = status;
-
   const res = await axios.get(`${FD_BASE}/competitions/WC/matches`, {
-    headers: fdHeaders(), params, timeout: 8000,
+    headers: fdHeaders(),
+    params: { dateFrom: new Date().toISOString().split("T")[0], dateTo: new Date().toISOString().split("T")[0] },
   });
 
-  const matches = (res.data.matches || []).map(m => ({
-    id:    `fd_${m.id}`,
-    fdId:  m.id,
-    date:  m.utcDate,
-    round: m.stage || m.group || "Group Stage",
-    status: m.status,
-    home: { name:m.homeTeam.name, score:m.score?.fullTime?.home??null, id:m.homeTeam.id },
-    away: { name:m.awayTeam.name, score:m.score?.fullTime?.away??null, id:m.awayTeam.id },
-    goals: [],
-    events: [],
+  const matches = res.data.matches.map(m => ({
+    id:       `fd_${m.id}`,
+    fdId:     m.id,
+    date:     m.utcDate,
+    round:    m.stage || m.group || "Group Stage",
+    status:   m.status, // TIMED, IN_PLAY, FINISHED, etc.
+    home: {
+      name:   m.homeTeam.name,
+      score:  m.score?.fullTime?.home ?? null,
+    },
+    away: {
+      name:   m.awayTeam.name,
+      score:  m.score?.fullTime?.away ?? null,
+    },
     source: "football-data.org",
   }));
 
@@ -180,66 +111,104 @@ async function fdGetMatches(dateFrom, dateTo, status = null) {
   return matches;
 }
 
-async function fdGetStandings() {
+// Fetch upcoming WC fixtures (next N days)
+export async function fdGetUpcomingMatches(daysAhead = 7) {
+  const today = new Date().toISOString().split("T")[0];
+  const future = new Date(Date.now() + daysAhead * 86400000).toISOString().split("T")[0];
+  const key = `fd_upcoming_${today}_${daysAhead}`;
+  const cached = getCached(key);
+  if (cached) return cached;
+
+  trackCall("fd");
+  const res = await axios.get(`${FD_BASE}/competitions/WC/matches`, {
+    headers: fdHeaders(),
+    params: { dateFrom: today, dateTo: future, status: "TIMED,SCHEDULED" },
+  });
+
+  const matches = res.data.matches.map(m => ({
+    id:    `fd_${m.id}`,
+    fdId:  m.id,
+    date:  m.utcDate,
+    round: m.stage || m.group || "Group Stage",
+    home:  { name: m.homeTeam.name, id: m.homeTeam.id },
+    away:  { name: m.awayTeam.name, id: m.awayTeam.id },
+    source: "football-data.org",
+  }));
+
+  setCache(key, matches);
+  return matches;
+}
+
+// Fetch WC standings from football-data.org
+export async function fdGetStandings() {
   const key = "fd_standings";
   const cached = getCached(key);
   if (cached) return cached;
+
   trackCall("fd");
-  const res = await axios.get(`${FD_BASE}/competitions/WC/standings`, { headers:fdHeaders(), timeout:8000 });
-  const data = res.data.standings || [];
-  setCache(key, data);
-  return data;
+  const res = await axios.get(`${FD_BASE}/competitions/WC/standings`, {
+    headers: fdHeaders(),
+  });
+
+  const standings = res.data.standings || [];
+  setCache(key, standings);
+  return standings;
 }
 
-async function fdGetH2H(fdMatchId) {
+// Fetch H2H between two teams from football-data.org
+export async function fdGetH2H(fdMatchId) {
   const key = `fd_h2h_${fdMatchId}`;
   const cached = getCached(key);
   if (cached) return cached;
+
   trackCall("fd");
-  const res = await axios.get(`${FD_BASE}/matches/${fdMatchId}/head2head`, { headers:fdHeaders(), params:{limit:5}, timeout:8000 });
-  const h2h = (res.data.matches||[]).map(m=>({ date:m.utcDate.split("T")[0], home:m.homeTeam.name, away:m.awayTeam.name, homeScore:m.score?.fullTime?.home, awayScore:m.score?.fullTime?.away }));
+  const res = await axios.get(`${FD_BASE}/matches/${fdMatchId}/head2head`, {
+    headers: fdHeaders(),
+    params: { limit: 5 },
+  });
+
+  const h2h = (res.data.matches || []).map(m => ({
+    date:      m.utcDate.split("T")[0],
+    home:      m.homeTeam.name,
+    away:      m.awayTeam.name,
+    homeScore: m.score?.fullTime?.home,
+    awayScore: m.score?.fullTime?.away,
+  }));
+
   setCache(key, h2h);
   return h2h;
 }
 
-// ══════════════════════════════════════════════════════════════
-// [3] api-football  — ENRICHMENT SOURCE (goals, stats, players)
-// ══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// API-FOOTBALL FUNCTIONS
+// Used for: live goals, player stats, lineups, events
+// league=1, season=2026
+// ═══════════════════════════════════════════════════════════════
 
-async function afGetFinished() {
-  // Use UTC date — GitHub Actions is UTC
+// Fetch finished matches with full events from api-football
+export async function afGetFinishedMatches() {
   const today = new Date().toISOString().split("T")[0];
-  const yesterday = new Date(Date.now()-86400000).toISOString().split("T")[0];
   const key = `af_finished_${today}`;
   const cached = getCached(key);
   if (cached) return cached;
 
   trackCall("af");
-  // Check both today AND yesterday to catch timezone edge cases
-  const [todayRes, yRes] = await Promise.allSettled([
-    axios.get(`${AF_BASE}/fixtures`, { headers:afHeaders(), params:{ league:1, season:2026, date:today, status:"FT" }, timeout:8000 }),
-    axios.get(`${AF_BASE}/fixtures`, { headers:afHeaders(), params:{ league:1, season:2026, date:yesterday, status:"FT" }, timeout:8000 }),
-  ]);
-
-  const todayMatches = todayRes.status==="fulfilled" ? todayRes.value.data.response : [];
-  const yMatches     = yRes.status==="fulfilled"     ? yRes.value.data.response     : [];
-
-  // Deduplicate
-  const seen = new Set();
-  const all = [...todayMatches, ...yMatches].filter(m => {
-    if (seen.has(m.fixture.id)) return false;
-    seen.add(m.fixture.id); return true;
+  const res = await axios.get(`${AF_BASE}/fixtures`, {
+    headers: afHeaders(),
+    params: { league:1, season:2026, date:today, status:"FT" },
   });
 
-  const matches = all.map(m => ({
+  const matches = res.data.response.map(m => ({
     id:    m.fixture.id,
     afId:  m.fixture.id,
     date:  m.fixture.date,
     round: m.league.round,
     home:  { name:m.teams.home.name, id:m.teams.home.id, score:m.goals.home },
     away:  { name:m.teams.away.name, id:m.teams.away.id, score:m.goals.away },
-    goals: (m.events||[]).filter(e=>e.type==="Goal").map(e=>({ team:e.team.name, player:e.player.name, minute:e.time.elapsed, type:e.detail })),
-    events: m.events||[],
+    goals: (m.events||[]).filter(e=>e.type==="Goal").map(e=>({
+      team:e.team.name, player:e.player.name, minute:e.time.elapsed, type:e.detail,
+    })),
+    events: m.events || [],
     source: "api-football",
   }));
 
@@ -247,172 +216,181 @@ async function afGetFinished() {
   return matches;
 }
 
-async function afGetUpcoming(fromH, toH) {
-  const now = new Date();
-  const today = now.toISOString().split("T")[0];
-  const tomorrow = new Date(Date.now()+86400000).toISOString().split("T")[0];
+// Fetch player stats for a specific fixture
+export async function afGetPlayerStats(fixtureId) {
+  const key = `af_players_${fixtureId}`;
+  const cached = getCached(key);
+  if (cached) return cached;
+
   trackCall("af");
+  const res = await axios.get(`${AF_BASE}/fixtures/players`, {
+    headers: afHeaders(),
+    params: { fixture: fixtureId },
+  });
 
-  const [todayRes, tomRes] = await Promise.allSettled([
-    axios.get(`${AF_BASE}/fixtures`, { headers:afHeaders(), params:{ league:1, season:2026, date:today, status:"NS" }, timeout:8000 }),
-    axios.get(`${AF_BASE}/fixtures`, { headers:afHeaders(), params:{ league:1, season:2026, date:tomorrow, status:"NS" }, timeout:8000 }),
-  ]);
+  const teams = res.data.response || [];
+  const allPlayers = teams.flatMap(team =>
+    team.players.map(p => ({
+      name:        p.player.name,
+      team:        team.team.name,
+      rating:      parseFloat(p.statistics[0]?.games?.rating || 0),
+      goals:       p.statistics[0]?.goals?.total || 0,
+      assists:     p.statistics[0]?.goals?.assists || 0,
+      appearances: p.statistics[0]?.games?.appearences || 0,
+      minutes:     p.statistics[0]?.games?.minutes || 0,
+      shots:       p.statistics[0]?.shots?.total || 0,
+      passes:      p.statistics[0]?.passes?.total || 0,
+      tackles:     p.statistics[0]?.tackles?.total || 0,
+    }))
+  );
 
-  const all = [
-    ...(todayRes.status==="fulfilled" ? todayRes.value.data.response : []),
-    ...(tomRes.status==="fulfilled" ? tomRes.value.data.response : []),
-  ];
-
-  return all
-    .filter(m => { const k=new Date(m.fixture.date); return k>=new Date(now.getTime()+fromH*3600000)&&k<=new Date(now.getTime()+toH*3600000); })
-    .map(m => ({ id:m.fixture.id, afId:m.fixture.id, date:m.fixture.date, round:m.league.round,
-      home:{name:m.teams.home.name,id:m.teams.home.id}, away:{name:m.teams.away.name,id:m.teams.away.id} }));
+  setCache(key, allPlayers);
+  return allPlayers;
 }
 
-// ══════════════════════════════════════════════════════════════
-// UNIFIED PUBLIC API — what the bots actually call
-// ══════════════════════════════════════════════════════════════
+// Fetch top scorers from api-football
+export async function afGetTopScorers() {
+  const key = "af_topscorers";
+  const cached = getCached(key);
+  if (cached) return cached;
 
-// Get finished matches — WC26 first → AF fallback → FD last resort
+  trackCall("af");
+  const res = await axios.get(`${AF_BASE}/players/topscorers`, {
+    headers: afHeaders(),
+    params: { league:1, season:2026 },
+  });
+
+  const scorers = res.data.response.slice(0,8).map(p => ({
+    name:        p.player.name,
+    team:        p.statistics[0]?.team?.name,
+    goals:       p.statistics[0]?.goals?.total || 0,
+    assists:     p.statistics[0]?.goals?.assists || 0,
+    appearances: p.statistics[0]?.games?.appearences || 0,
+    rating:      parseFloat(p.statistics[0]?.games?.rating || 0).toFixed(1),
+  }));
+
+  setCache(key, scorers);
+  return scorers;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// UNIFIED FUNCTIONS — smart routing between both APIs
+// ═══════════════════════════════════════════════════════════════
+
+// Get finished matches — try AF first (has events/goals), fallback to FD
 export async function getFinishedMatches() {
-  // Try worldcup26.ir first (no key needed)
   try {
-    const matches = await wcGetMatches("finished");
-    if (matches.length > 0) {
-      console.log(`  ✅ [worldcup26.ir] ${matches.length} finished match(es)`);
-      // Enrich with AF goals/events if we have budget
-      const counts = (() => { try{return JSON.parse(fs.readFileSync(COUNTS_FILE,"utf8"));}catch{return{af:0};} })();
-      if ((counts.af||0) < 80) {
-        for (const m of matches) {
-          if (m.goals.length===0 && m.home.score>0 || m.away.score>0) {
-            const afData = await afGetFinished().catch(()=>[]);
-            const afMatch = afData.find(a => a.home.name===m.home.name && a.away.name===m.away.name);
-            if (afMatch?.goals.length) { m.goals=afMatch.goals; m.events=afMatch.events; m.afId=afMatch.afId; }
-          }
-        }
-      }
-      return matches;
-    }
-  } catch(e) { console.log(`  ⚠️  worldcup26.ir failed: ${e.message}`); }
-
-  // Fallback: api-football
-  try {
-    const matches = await afGetFinished();
-    if (matches.length > 0) { console.log(`  ✅ [api-football] ${matches.length} finished match(es)`); return matches; }
-  } catch(e) { console.log(`  ⚠️  api-football failed: ${e.message}`); }
-
-  // Last resort: football-data.org
-  try {
-    const today = new Date().toISOString().split("T")[0];
-    const yesterday = new Date(Date.now()-86400000).toISOString().split("T")[0];
-    const matches = await fdGetMatches(yesterday, today, "FINISHED");
-    console.log(`  ✅ [football-data.org] ${matches.length} finished match(es)`);
-    return matches;
-  } catch(e) { console.log(`  ⚠️  football-data.org failed: ${e.message}`); }
-
-  return [];
+    const matches = await afGetFinishedMatches();
+    if (matches.length > 0) return matches;
+    console.log("  ℹ️  AF returned 0 matches, trying football-data.org...");
+    throw new Error("No matches from AF");
+  } catch (e) {
+    console.log(`  ⚠️  AF failed (${e.message}), falling back to football-data.org`);
+    const fdMatches = await fdGetTodaysMatches();
+    return fdMatches.filter(m => m.status === "FINISHED");
+  }
 }
 
-// Get upcoming — WC26 first → AF fallback → FD last resort
+// Get upcoming matches — use FD (better schedule data, saves AF quota)
 export async function getUpcomingMatches(fromH, toH) {
   const now = new Date();
-
   try {
-    const all = await wcGetMatches("upcoming");
-    const filtered = all.filter(m => {
-      const k = new Date(m.date);
-      return k >= new Date(now.getTime()+fromH*3600000) && k <= new Date(now.getTime()+toH*3600000);
-    });
-    if (filtered.length > 0 || all.length > 0) return filtered;
-  } catch(e) { console.log(`  ⚠️  WC26 upcoming: ${e.message}`); }
-
-  try { return await afGetUpcoming(fromH, toH); }
-  catch(e) { console.log(`  ⚠️  AF upcoming: ${e.message}`); }
-
-  try {
-    const today = new Date().toISOString().split("T")[0];
-    const tomorrow = new Date(Date.now()+86400000).toISOString().split("T")[0];
-    const all = await fdGetMatches(today, tomorrow, "SCHEDULED,TIMED");
+    // FD: get next 2 days, then filter by time window
+    const all = await fdGetUpcomingMatches(2);
     return all.filter(m => {
-      const k=new Date(m.date);
-      return k>=new Date(now.getTime()+fromH*3600000)&&k<=new Date(now.getTime()+toH*3600000);
+      const k = new Date(m.date);
+      return k >= new Date(now.getTime() + fromH*3600000) && k <= new Date(now.getTime() + toH*3600000);
     });
-  } catch(e) { console.log(`  ⚠️  FD upcoming: ${e.message}`); }
-
-  return [];
+  } catch (e) {
+    console.log(`  ⚠️  FD failed (${e.message}), falling back to api-football`);
+    trackCall("af");
+    const today = now.toISOString().split("T")[0];
+    const res = await axios.get(`${AF_BASE}/fixtures`, {
+      headers: afHeaders(),
+      params: { league:1, season:2026, date:today, status:"NS" },
+    });
+    return res.data.response
+      .filter(m => { const k=new Date(m.fixture.date); return k>=new Date(now.getTime()+fromH*3600000)&&k<=new Date(now.getTime()+toH*3600000); })
+      .map(m => ({ id:m.fixture.id, date:m.fixture.date, round:m.league.round,
+        home:{name:m.teams.home.name,id:m.teams.home.id}, away:{name:m.teams.away.name,id:m.teams.away.id} }));
+  }
 }
 
-// Get standings
+// Get standings — use FD (saves AF quota)
 export async function getStandings() {
-  try { return await wcGetStandings(); } catch(e) { console.log(`  ⚠️  WC26 standings: ${e.message}`); }
-  try { return await fdGetStandings(); } catch(e) { console.log(`  ⚠️  FD standings: ${e.message}`); }
-  return [];
+  try {
+    return await fdGetStandings();
+  } catch (e) {
+    console.log(`  ⚠️  FD standings failed, falling back to api-football`);
+    trackCall("af");
+    const res = await axios.get(`${AF_BASE}/standings`, {
+      headers: afHeaders(),
+      params: { league:1, season:2026 },
+    });
+    return res.data.response[0]?.league?.standings || [];
+  }
 }
 
-// Get H2H
+// Get H2H — use FD (saves AF quota)
 export async function getH2H(match) {
-  if (match.fdId) { try { return await fdGetH2H(match.fdId); } catch{} }
+  if (match.fdId) {
+    try { return await fdGetH2H(match.fdId); } catch(e) { console.log("  ⚠️  FD H2H failed:", e.message); }
+  }
+  // Fallback: af h2h
   if (match.home?.id && match.away?.id) {
     try {
       trackCall("af");
       const res = await axios.get(`${AF_BASE}/fixtures/headtohead`, {
-        headers:afHeaders(), params:{h2h:`${match.home.id}-${match.away.id}`,last:5}, timeout:8000,
+        headers: afHeaders(),
+        params: { h2h:`${match.home.id}-${match.away.id}`, last:5 },
       });
-      return res.data.response.slice(0,5).map(m=>({ date:m.fixture.date.split("T")[0], home:m.teams.home.name, away:m.teams.away.name, homeScore:m.goals.home, awayScore:m.goals.away }));
-    } catch{}
+      return res.data.response.slice(0,5).map(m=>({
+        date:m.fixture.date.split("T")[0], home:m.teams.home.name, away:m.teams.away.name,
+        homeScore:m.goals.home, awayScore:m.goals.away,
+      }));
+    } catch(e) { console.log("  ⚠️  AF H2H failed:", e.message); }
   }
   return [];
 }
 
-// Get today's results (for daily roundup — merges all sources)
+// Get today's results for daily roundup — try both, merge unique
 export async function getTodaysResults() {
-  const results=[], seen=new Set();
-  const add = (m) => { const k=`${m.home.name}_${m.away.name}`; if(!seen.has(k)){seen.add(k);results.push(m);} };
+  const results = [];
+  const seen = new Set();
 
-  try { (await wcGetMatches("finished")).forEach(add); } catch{}
-  try { (await afGetFinished()).forEach(add); } catch{}
+  try {
+    const af = await afGetFinishedMatches();
+    af.forEach(m => { if(!seen.has(m.id)){seen.add(m.id);results.push(m);} });
+  } catch(e) { console.log("  ⚠️  AF today results:", e.message); }
+
+  try {
+    const fd = await fdGetTodaysMatches();
+    fd.filter(m=>m.status==="FINISHED").forEach(m => { if(!seen.has(m.id)){seen.add(m.id);results.push(m);} });
+  } catch(e) { console.log("  ⚠️  FD today results:", e.message); }
 
   return results;
 }
 
-// Get top scorers (AF only)
+// Get top scorers — AF only (FD doesn't have player stats on free tier)
 export async function getTopScorers() {
-  trackCall("af");
-  const res = await axios.get(`${AF_BASE}/players/topscorers`, {
-    headers:afHeaders(), params:{league:1,season:2026}, timeout:8000,
-  });
-  return res.data.response.slice(0,8).map(p=>({
-    name:p.player.name, team:p.statistics[0]?.team?.name,
-    goals:p.statistics[0]?.goals?.total||0, assists:p.statistics[0]?.goals?.assists||0,
-    appearances:p.statistics[0]?.games?.appearences||0,
-    rating:parseFloat(p.statistics[0]?.games?.rating||0).toFixed(1),
-  }));
+  return afGetTopScorers();
 }
 
-// Get player stats (AF only)
+// Get player stats for MOTM — AF only
 export async function getMatchPlayerStats(fixtureId) {
-  if (!fixtureId || String(fixtureId).startsWith("wc_") || String(fixtureId).startsWith("fd_")) return [];
-  trackCall("af");
-  const res = await axios.get(`${AF_BASE}/fixtures/players`, {
-    headers:afHeaders(), params:{fixture:fixtureId}, timeout:8000,
-  });
-  return (res.data.response||[]).flatMap(team =>
-    team.players.map(p=>({
-      name:p.player.name, team:team.team.name,
-      rating:parseFloat(p.statistics[0]?.games?.rating||0),
-      goals:p.statistics[0]?.goals?.total||0,
-      assists:p.statistics[0]?.goals?.assists||0,
-      minutes:p.statistics[0]?.games?.minutes||0,
-      shots:p.statistics[0]?.shots?.total||0,
-      tackles:p.statistics[0]?.tackles?.total||0,
-    }))
-  );
+  // Only works with AF fixture IDs (not FD IDs)
+  if (typeof fixtureId === "string" && fixtureId.startsWith("fd_")) {
+    console.log("  ℹ️  Player stats unavailable for FD matches (use AF fixture ID)");
+    return [];
+  }
+  return afGetPlayerStats(fixtureId);
 }
 
-// Print API usage
+// Print API usage summary
 export function printApiUsage() {
-  try {
-    const c=JSON.parse(fs.readFileSync(COUNTS_FILE,"utf8"));
-    console.log(`\n📊 API calls today — worldcup26.ir: ${c.wc||0} | football-data.org: ${c.fd||0} | api-football: ${c.af||0}/100`);
-  } catch{}
+  const c = loadCounts();
+  const today = new Date().toISOString().split("T")[0];
+  if (c.date !== today) return;
+  console.log(`\n📊 API Usage today — football-data.org: ${c.fd||0} calls | api-football: ${c.af||0}/100 calls`);
 }
+ 
